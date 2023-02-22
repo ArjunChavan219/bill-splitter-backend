@@ -1,0 +1,12 @@
+**/.DS_Store
+
+# Frontend
+**/node_modules
+**/build
+
+# Backend
+**/venv
+**/.idea
+**/__pycache__
+
+.env
