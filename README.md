@@ -14,5 +14,5 @@ pip install -r requirements.txt
 ## Deployment
 ```bash
 source venv/bin/activate
-gunicorn --workers=1 --bind 0.0.0.0:5001 server:app
+gunicorn server:app
 ```
