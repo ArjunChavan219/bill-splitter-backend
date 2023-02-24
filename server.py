@@ -70,8 +70,13 @@ def user_data():
 # Get list of all unsettled bills
 @app.route('/api/bills', methods=["GET"])
 def get_bills():
+    user_group = request.args.get("userGroup")
+    if user_group == "admin":
+        all_bills = bills.find({"status": {"$ne": "settled"}}, {"_id": False, "name": True})
+    else:
+        all_bills = bills.find({"status": {"$ne": "settled"}, "group": user_group}, {"_id": False, "name": True})
     return {
-        "bills": [bill["name"] for bill in bills.find({"status": {"$ne": "settled"}}, {"_id": False, "name": True})]
+        "bills": [bill["name"] for bill in all_bills]
     }
 
 
