@@ -327,5 +327,20 @@ def submit_bill():
     return {}
 
 
+# Return users for that userGroup
+@app.route('/api/users', methods=["GET"])
+@token_check
+def get_users():
+    group = request.args["group"]
+    user_list = list(db.userGroups.find({"name": {"$in": ["admin", group]}}, {"_id": False, "users": True}))
+    users_list = []
+    for user in user_list:
+        users_list.extend(user["users"])
+
+    return {
+        "users": users_list
+    }
+
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", debug=True)
