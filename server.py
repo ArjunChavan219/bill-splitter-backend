@@ -221,7 +221,7 @@ def manage_bill():
 
         if len(sharing) == 0:
             if total_share != 1:
-                change = (1 - total_share)/len(specified)
+                change = (1 - total_share) / len(specified)
                 for user in item_users:
                     if user["username"] in specified:
                         user["share"] = round(user["share"] + change, 2)
@@ -237,7 +237,7 @@ def manage_bill():
                     for user in item_users:
                         if user["username"] in specified:
                             user["share"] += change
-                change = 1/(len(specified)+len(sharing))
+                change = 1 / (len(specified) + len(sharing))
 
                 for user in item_users:
                     if user["username"] in sharing:
@@ -245,7 +245,8 @@ def manage_bill():
                     else:
                         user["share"] = round(user["share"] * change * len(specified), 2)
 
-    extra_items = [item["name"] for item in list(bills.find({"name": bill}, {"_id": False, "items": True}))[0]["items"]]
+    bill_data = list(bills.find({"name": bill}, {"_id": False, "items": True, "group": True}))[0]
+    extra_items = [item["name"] for item in bill_data["items"]]
     for item in extra_items:
         if item not in items_data:
             items_data[item] = {
@@ -255,7 +256,8 @@ def manage_bill():
 
     return {
         "items": list(items_data.values()),
-        "users": bill_users
+        "users": bill_users,
+        "group": bill_data["group"]
     }
 
 
