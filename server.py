@@ -264,7 +264,11 @@ def manage_bill():
 # Save bill and update amounts for users
 @app.route('/api/save-bill', methods=["POST"])
 def save_bill():
+    bill = request.json["bill"]
+    new_users = request.json["newUsers"]
+    old_users = request.json["oldUsers"]
     items_data = request.json["items"]
+
     bill_data = list(bills.find({"name": request.json["bill"]}, {"_id": False, "items": True}))[0]["items"]
     items = {item["name"]: item for item in bill_data}
     user_items = {}
@@ -272,21 +276,53 @@ def save_bill():
         for user in item["users"]:
             if user["username"] not in user_items:
                 user_items[user["username"]] = {"items": [], "amount": 0}
-            cost = round(items[item["name"]]["cost"] * user["share"], 2)
+
             user_items[user["username"]]["items"].append({
                 "name": item["name"],
                 "quantity": items[item["name"]]["quantity"],
                 "type": items[item["name"]]["type"],
                 "share": user["share"],
-                "cost": cost
+                "cost": round(items[item["name"]]["cost"] * user["share"], 2)
             })
-            user_items[user["username"]]["amount"] += cost
 
-    bills.update_one({"name": request.json["bill"]}, {"$set": {"status": "settled"}})
-    users.bulk_write([pymongo.UpdateOne({"username": user, "bills.name": request.json["bill"]},
-                                        {"$set": {"bills.$.items": user_items[user]["items"],
-                                                  "bills.$.amount": round(user_items[user]["amount"])}})
-                      for user in user_items])
+    existing_users = list(set(user_items) - set(new_users) - set(old_users))
+
+    if len(new_users) != 0:
+        users.bulk_write([pymongo.UpdateOne({"username": user},
+                                            {"$push": {"bills": {"name": bill, "items": user_items[user]["items"],
+                                                                 "amount": 0, "paid": False, "locked": True}}})
+                          for user in new_users])
+        bills.bulk_write([pymongo.UpdateOne({"name": bill}, {"$push": {"members": {"username": user, "locked": True}}})
+                          for user in new_users])
+
+    if len(old_users) != 0:
+        users.update_many({"username": {"$in": old_users}}, {"$pull": {"bills": {"name": bill}}})
+        bills.update_one({"name": bill}, {"$pull": {"members": {"username": {"$in": old_users}}}})
+
+    users.bulk_write([pymongo.UpdateOne({"username": user, "bills.name": bill},
+                                        {"$set": {"bills.$.items": user_items[user]["items"]}})
+                      for user in existing_users])
+
+    return {}
+
+
+# Save bill and update amounts for users
+@app.route('/api/submit-bill', methods=["POST"])
+@token_check
+def submit_bill():
+    bill = request.json["bill"]
+    bill_users = list(users.find({"bills.name": bill}, {"_id": False, "username": True, "bills.$": True}))
+    user_amounts = {}
+
+    for user in bill_users:
+        user_amounts[user["username"]] = 0
+        for item in user["bills"][0]["items"]:
+            user_amounts[user["username"]] += item["cost"]
+
+    bills.update_one({"name": bill}, {"$set": {"status": "settled"}})
+    users.bulk_write([pymongo.UpdateOne({"username": user, "bills.name": bill},
+                                        {"$set": {"bills.$.amount": round(user_amounts[user], 2)}})
+                      for user in user_amounts])
 
     return {}
 
