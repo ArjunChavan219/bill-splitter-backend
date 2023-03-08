@@ -1,7 +1,9 @@
+import jwt
 import pymongo
 from flask import Flask, request
 from flask_cors import CORS
-
+from functools import wraps
+from werkzeug.security import generate_password_hash, check_password_hash
 
 client = pymongo.MongoClient("mongodb://localhost:27017/")
 db = client["billSplitterDB"]
@@ -10,6 +12,31 @@ bills = db["bills"]
 
 app = Flask(__name__)
 CORS(app)
+
+
+def auth_error(error):
+    return {
+        "error": error
+    }
+
+
+def token_check(f):
+    @wraps(f)
+    def decorated_function():
+        if 'x-access-token' not in request.headers or "x-access-user" not in request.headers:
+            return auth_error("Missing headers")
+
+        try:
+            token = jwt.decode(request.headers["x-access-token"], "secret", algorithms=["HS256"])
+        except (jwt.InvalidTokenError, jwt.DecodeError):
+            return auth_error("Invalid token")
+
+        if token["username"] != request.headers["x-access-user"]:
+            return auth_error("Invalid user token")
+
+        return f()
+
+    return decorated_function
 
 
 # Check if username and password exist
@@ -25,23 +52,26 @@ def login_check():
             "success": False,
             "error": "Username"
         }
-    if users_dict[username] != password:
+
+    if not check_password_hash(users_dict[username], password):
         return {
             "success": False,
             "error": "Password"
         }
 
     return {
-        "success": True
+        "success": True,
+        "token": jwt.encode({"username": username}, "secret", algorithm="HS256"),
+        "userGroup": db["userGroups"].find({"users": username}, {"_id": False, "name": True})[0]["name"]
     }
 
 
 # Change password
 @app.route('/api/password', methods=["POST"])
+@token_check
 def change_password():
-    print(request.json)
     username = request.json["username"]
-    password = request.json["password"]
+    password = generate_password_hash(request.json["password"], "sha256")
     users.update_one({"username": username}, {"$set": {"password": password}})
 
     return {
@@ -49,19 +79,9 @@ def change_password():
     }
 
 
-# Get User Group for a user
-@app.route('/api/permission', methods=["GET"])
-def permission_check():
-    user_groups = db["userGroups"]
-    username = request.args.get("username")
-
-    return {
-        "userGroup": user_groups.find({"users": username}, {"_id": False, "name": True})[0]["name"]
-    }
-
-
 # Get User data
 @app.route('/api/user', methods=["GET"])
+@token_check
 def user_data():
     username = request.args.get("username")
     return users.find({"username": username}, {"_id": False, "firstName": True, "lastName": True})[0]
@@ -69,6 +89,7 @@ def user_data():
 
 # Get list of all unsettled bills
 @app.route('/api/bills', methods=["GET"])
+@token_check
 def get_bills():
     user_group = request.args.get("userGroup")
     if user_group == "admin":
@@ -82,6 +103,7 @@ def get_bills():
 
 # Get bill data
 @app.route('/api/bill', methods=["GET"])
+@token_check
 def get_bill():
     items = list(bills.find({"name": request.args.get("bill")}, {"_id": False, "items": True}))[0]["items"]
     for item in items:
@@ -93,6 +115,7 @@ def get_bill():
 
 # Get bills for the user
 @app.route('/api/user-bills', methods=["GET"])
+@token_check
 def get_user_bills():
     return list(users.find({"username": request.args.get("username")},
                            {"_id": False, "bills.name": True, "bills.amount": True,
@@ -101,6 +124,7 @@ def get_user_bills():
 
 # Get a bill for the user
 @app.route('/api/user-bill', methods=["GET"])
+@token_check
 def get_user_bill():
     return list(users.find({"username": request.args.get("username"), "bills.name": request.args.get("bill")},
                            {"_id": False, "bills.$": 1}))[0]["bills"][0]
@@ -108,6 +132,7 @@ def get_user_bill():
 
 # Add a bill to user bills
 @app.route('/api/add-user-bills', methods=["POST"])
+@token_check
 def add_user_bills():
     user_entry = {"username": request.json["username"], "locked": False}
     user_bills = [{"name": bill, "items": [], "amount": 0, "paid": False, "locked": False}
@@ -121,6 +146,7 @@ def add_user_bills():
 
 # Remove a bill from user bills
 @app.route('/api/remove-user-bills', methods=["POST"])
+@token_check
 def remove_user_bills():
     username = request.json["username"]
     bill_names = request.json["bills"]
@@ -133,6 +159,7 @@ def remove_user_bills():
 
 # Update a user bill
 @app.route('/api/update-user-bill', methods=["POST"])
+@token_check
 def update_user_bill():
     users.update_one({"username": request.json["username"], "bills.name": request.json["bill"]},
                      {"$set": {"bills.$.items": request.json["items"]}})
@@ -142,6 +169,7 @@ def update_user_bill():
 
 # Lock a user bill
 @app.route('/api/lock-user-bill', methods=["POST"])
+@token_check
 def lock_user_bill():
     username = request.json["username"]
     bill_name = request.json["bill"]
@@ -155,6 +183,7 @@ def lock_user_bill():
 
 # Unlock a bill for the users
 @app.route('/api/unlock-bill', methods=["POST"])
+@token_check
 def unlock_bill():
     usernames = request.json["users"]
     bill_name = request.json["bill"]
@@ -168,6 +197,7 @@ def unlock_bill():
 
 # Get all bills and update their statuses
 @app.route('/api/all-bills', methods=["GET"])
+@token_check
 def get_all_bills():
     all_bills = list(bills.find({}, {"_id": False, "name": True, "status": True, "members.locked": True}))
     update_bills = []
@@ -190,6 +220,7 @@ def get_all_bills():
 
 # Calculate and get user and item details for a bill
 @app.route('/api/manage-bill', methods=["GET"])
+@token_check
 def manage_bill():
     bill = request.args.get("bill")
     users_data = list(users.find({"bills.name": bill}, {"_id": False, "username": True, "bills.$": True}))
@@ -263,6 +294,7 @@ def manage_bill():
 
 # Save bill and update amounts for users
 @app.route('/api/save-bill', methods=["POST"])
+@token_check
 def save_bill():
     bill = request.json["bill"]
     new_users = request.json["newUsers"]
