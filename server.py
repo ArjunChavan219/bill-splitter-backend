@@ -401,5 +401,20 @@ def bill_split():
     }
 
 
+# Return all users and their respective debts
+@app.route('/api/all-users', methods=["GET"])
+@token_check
+def all_users():
+    users_list = list(users.find({}, {"_id": False, "username": True, "bills.name": True,
+                                      "bills.amount": True, "bills.paid": True}))
+
+    for itr, user in enumerate(users_list):
+        users_list[itr]["bills"] = [bill for bill in user["bills"] if not bill["paid"] and bill["amount"] != 0]
+
+    return {
+        "users": users_list
+    }
+
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", debug=True)
