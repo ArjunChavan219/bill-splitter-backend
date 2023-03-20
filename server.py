@@ -39,6 +39,14 @@ def token_check(f):
     return decorated_function
 
 
+# Server test ping
+@app.route('/api/ping', methods=["GET"])
+def server_ping():
+    return {
+        "status": 200
+    }
+
+
 # Check if username and password exist
 @app.route('/api/login', methods=["GET"])
 def login_check():
