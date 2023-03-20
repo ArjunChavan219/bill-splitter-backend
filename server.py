@@ -382,5 +382,24 @@ def get_users():
     }
 
 
+# Return users and their shares for that bill
+@app.route('/api/bill-split', methods=["GET"])
+@token_check
+def bill_split():
+    bill = request.args["bill"]
+    bill_users = list(users.find({"bills.name": bill}, {"_id": False, "username": True, "bills.$": True}))
+    users_list = []
+    for user in bill_users:
+        users_list.append({
+            "name": user["username"],
+            "share": user["bills"][0]["amount"],
+            "paid": user["bills"][0]["paid"]
+        })
+
+    return {
+        "users": users_list
+    }
+
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", debug=True)
