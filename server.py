@@ -150,7 +150,7 @@ def get_bills():
 @app.route('/api/bill', methods=["GET"])
 @token_check
 def get_bill():
-    bill = request.args.get("bill")
+    bill = request.args.get("bill").replace("'", "''")
     items = get_data("item_name, quantity, type", "items", [],
                      ["name", "quantity", "type"], f" where bill_name='{bill}'")
     for item in items:
@@ -174,7 +174,7 @@ def get_user_bills():
 @token_check
 def get_user_bill():
     username = request.args.get("username")
-    bill = request.args.get("bill")
+    bill = request.args.get("bill").replace("'", "''")
     bill_data = get_data("bill_name, amount, paid, locked", "user_bills", ["amount"],
                          ["name", "amount", "paid", "locked"], f"where username='{username}' and bill_name='{bill}'")[0]
     bill_data["items"] = get_data("item_name, amount, quantity, share, type", "user_items", ["cost", "share"],
@@ -210,7 +210,7 @@ def remove_user_bills():
 @token_check
 def update_user_bill():
     username = request.json["username"]
-    bill = request.json["bill"]
+    bill = request.json["bill"].replace("'", "''")
     items = request.json["items"]
     item_ids = get_item_ids(bill, [item["name"] for item in items])
     entries = get_item_entries(username, items, item_ids)
@@ -225,7 +225,7 @@ def update_user_bill():
 @token_check
 def lock_user_bill():
     username = request.json["username"]
-    bill_name = request.json["bill"]
+    bill_name = request.json["bill"].replace("'", "''")
     cur.execute(f"update user_bills set locked=true where username='{username}' and bill_name='{bill_name}';")
     return {}
 
@@ -235,7 +235,7 @@ def lock_user_bill():
 @token_check
 def unlock_bill():
     usernames = ", ".join(request.json["users"])
-    bill_name = request.json["bill"]
+    bill_name = request.json["bill"].replace("'", "''")
     cur.execute(f"update user_bills set locked=false where bill_name='{bill_name}' and username in ({usernames});")
     return {}
 
@@ -256,7 +256,7 @@ def get_all_bills():
             bill["members"] = user_count
         if bill["status"] != "settled" and bill["status"] != status:
             bill["status"] = status
-            update_bills.append((bill["name"], status))
+            update_bills.append((bill["name"].replace("'", "''"), status))
 
     if len(update_bills) != 0:
         entries = ", ".join([f"('{entry[0]}', '{entry[1]}')" for entry in update_bills])
@@ -272,7 +272,7 @@ def get_all_bills():
 @app.route('/api/manage-bill', methods=["GET"])
 @token_check
 def manage_bill():
-    bill = request.args.get("bill")
+    bill = request.args.get("bill").replace("'", "''")
     cur.execute(f"select username from user_bills where bill_name='{bill}';")
     bill_users = [bill_data[0] for bill_data in cur.fetchall()]
 
@@ -344,11 +344,11 @@ def manage_bill():
 @app.route('/api/save-bill', methods=["POST"])
 @token_check
 def save_bill():
-    bill = request.json["bill"]
+    bill = request.json["bill"].replace("'", "''")
     new_users = request.json["newUsers"]
     old_users = request.json["oldUsers"]
     items_data = request.json["items"]
-
+    print(items_data)
     bill_data = get_data("item_name, cost, quantity, type", "items", ["cost"],
                          ["name", "cost", "quantity", "type"], f"where bill_name='{bill}'")
     items = {item["name"]: item for item in bill_data}
@@ -357,7 +357,6 @@ def save_bill():
         for user in item["users"]:
             if user["username"] not in user_items:
                 user_items[user["username"]] = {"items": [], "amount": 0}
-
             user_items[user["username"]]["items"].append({
                 "name": item["name"],
                 "quantity": items[item["name"]]["quantity"],
@@ -391,7 +390,7 @@ def save_bill():
 @app.route('/api/submit-bill', methods=["POST"])
 @token_check
 def submit_bill():
-    bill = request.json["bill"]
+    bill = request.json["bill"].replace("'", "''")
     user_amounts = {}
     cur.execute(f"select username, amount\n"
                 f"from user_items ui inner join items i on ui.item_id=i.item_id\n"
@@ -424,7 +423,7 @@ def get_users():
 @app.route('/api/bill-split', methods=["GET"])
 @token_check
 def bill_split():
-    bill = request.args["bill"]
+    bill = request.args["bill"].replace("'", "''")
     return {
         "users": get_data("username, amount, paid", "user_bills", ["share"],
                           ["name", "share", "paid"], f"where bill_name='{bill}'")
@@ -448,4 +447,4 @@ def all_users():
 
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", debug=True, port=3000)
+    app.run(host="0.0.0.0", debug=True, port=5000)
