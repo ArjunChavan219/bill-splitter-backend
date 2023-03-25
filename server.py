@@ -56,13 +56,15 @@ def get_data(input_cols, table_name, format_cols, output_cols, condition=""):
 
 
 # Function for ids for items
-def get_item_ids(bill, items):
-    item_condition = ""
-    if len(items) != 0:
-        item_names = ", ".join(["'"+item.replace("'", "''")+"'" for item in items])
-        item_condition = f" and item_name in ({item_names})"
-    cur.execute(f"select item_id, item_name from items where bill_name='{bill}'{item_condition};")
-    return {name: item_id for item_id, name in cur.fetchall()}
+def get_item_ids(bill):
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    cur.execute(f"select item_id, item_name from items where bill_name='{bill}';")
+    ids = {name: item_id for item_id, name in cur.fetchall()}
+
+    conn.commit()
+    conn.close()
+    return ids, ", ".join([str(id_) for id_ in ids.values()])
 
 
 # Function to get item entry strings
@@ -212,10 +214,10 @@ def update_user_bill():
     username = request.json["username"]
     bill = request.json["bill"].replace("'", "''")
     items = request.json["items"]
-    item_ids = get_item_ids(bill, [item["name"] for item in items])
+    item_ids, id_query = get_item_ids(bill)
     entries = get_item_entries(username, items, item_ids)
-    cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries}\n"
-                f"ON CONFLICT (username, item_id) DO UPDATE SET (amount, share) = (excluded.amount, excluded.share);")
+    cur.execute(f"delete from user_items where username='{username}' and item_id in ({id_query});")
+    cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries};")
 
     return {}
 
@@ -366,7 +368,7 @@ def save_bill():
             })
 
     existing_users = list(set(user_items) - set(new_users) - set(old_users))
-    item_ids = get_item_ids(bill, [])
+    item_ids, id_query = get_item_ids(bill)
 
     if len(new_users) != 0:
         entries = ", ".join([f"('{user}', '{bill}', 0, false, true)" for user in new_users])
@@ -378,10 +380,12 @@ def save_bill():
     if len(old_users) != 0:
         entries = ", ".join(["'" + user + "'" for user in old_users])
         cur.execute(f"delete from user_bills where username in ({entries}) and bill_name='{bill}';")
+        cur.execute(f"delete from user_items where username in ({entries}) and item_id in ({id_query});")
 
+    entries = ", ".join(["'" + user + "'" for user in existing_users])
+    cur.execute(f"delete from user_items where username in ({entries}) and item_id in ({id_query});")
     entries = ", ".join([get_item_entries(user, user_items[user]["items"], item_ids) for user in existing_users])
-    cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries}\n"
-                f"ON CONFLICT (username, item_id) DO UPDATE SET (amount, share) = (excluded.amount, excluded.share);")
+    cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries};")
 
     return {}
 
