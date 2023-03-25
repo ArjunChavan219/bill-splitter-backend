@@ -1,25 +1,29 @@
+import os
 import jwt
-import pymongo
-from flask import Flask, request
+import psycopg2
+import pandas as pd
 from flask_cors import CORS
 from functools import wraps
+from dotenv import load_dotenv
+from flask import Flask, request
 from werkzeug.security import generate_password_hash, check_password_hash
 
-client = pymongo.MongoClient("mongodb://localhost:27017/")
-db = client["billSplitterDB"]
-users = db["users"]
-bills = db["bills"]
+load_dotenv()
+
+connection = f"dbname=bill_splitter_db user={os.getenv('DB_USER')} password={os.getenv('DB_PASSWORD')}"
 
 app = Flask(__name__)
 CORS(app)
 
 
+# Function to return error object
 def auth_error(error):
     return {
         "error": error
     }
 
 
+# Function for token authentication
 def token_check(f):
     @wraps(f)
     def decorated_function():
@@ -39,6 +43,42 @@ def token_check(f):
     return decorated_function
 
 
+# Function for get user item/bill data
+def get_data(input_cols, table_name, format_cols, output_cols, condition=""):
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    table = "user_items ui inner join items i on ui.item_id=i.item_id" if table_name == "user_items" else table_name
+    cur.execute(f"select {input_cols} from {table} {condition};")
+    df = pd.DataFrame(cur.fetchall(), columns=output_cols)
+    for col in format_cols:
+        df[col] = df[col].astype("float")
+
+    conn.commit()
+    conn.close()
+    return df.to_dict("records")
+
+
+# Function for ids for items
+def get_item_ids(bill):
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    cur.execute(f"select item_id, item_name from items where bill_name='{bill}';")
+    ids = {name: item_id for item_id, name in cur.fetchall()}
+
+    conn.commit()
+    conn.close()
+    return ids, ", ".join([str(id_) for id_ in ids.values()])
+
+
+# Function to get item entry strings
+def get_item_entries(username, items, item_ids):
+    item_entries = []
+    for item in items:
+        item_id, amount, share = item_ids[item["name"]], item["cost"], item["share"]
+        item_entries.append(f"('{username}', {str(item_id)}, {str(amount)}, {str(share)})")
+    return ", ".join(item_entries)
+
+
 # Server test ping
 @app.route('/api/ping', methods=["GET"])
 def server_ping():
@@ -50,27 +90,37 @@ def server_ping():
 # Check if username and password exist
 @app.route('/api/login', methods=["GET"])
 def login_check():
-    users_list = list(users.find({}, {"_id": False, "username": True, "password": True}))
-    users_dict = {user["username"]: user["password"] for user in users_list}
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    cur.execute(f"select username, password from users;")
+    users_dict = {username: password for username, password in cur.fetchall()}
 
     username = request.args.get("username")
     password = request.args.get("password")
     if username not in users_dict:
+        conn.commit()
+        conn.close()
         return {
             "success": False,
             "error": "Username"
         }
 
     if not check_password_hash(users_dict[username], password):
+        conn.commit()
+        conn.close()
         return {
             "success": False,
             "error": "Password"
         }
 
+    cur.execute(f"select user_group from users where username='{username}';")
+
+    conn.commit()
+    conn.close()
     return {
         "success": True,
         "token": jwt.encode({"username": username}, "secret", algorithm="HS256"),
-        "userGroup": db["userGroups"].find({"users": username}, {"_id": False, "name": True})[0]["name"]
+        "userGroup": cur.fetchone()[0]
     }
 
 
@@ -78,10 +128,14 @@ def login_check():
 @app.route('/api/password', methods=["POST"])
 @token_check
 def change_password():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
     password = generate_password_hash(request.json["password"], "sha256")
-    users.update_one({"username": username}, {"$set": {"password": password}})
+    cur.execute(f"update users set password='{password}' where username='{username}';")
 
+    conn.commit()
+    conn.close()
     return {
         "success": True
     }
@@ -91,21 +145,29 @@ def change_password():
 @app.route('/api/user', methods=["GET"])
 @token_check
 def user_data():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.args.get("username")
-    return users.find({"username": username}, {"_id": False, "firstName": True, "lastName": True})[0]
+    cur.execute(f"select first_name, last_name from users where username='{username}';")
+    conn.commit()
+    conn.close()
+    return {key: value for key, value in zip(["firstName", "lastName"], cur.fetchone())}
 
 
 # Get list of all unsettled bills
 @app.route('/api/bills', methods=["GET"])
 @token_check
 def get_bills():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     user_group = request.args.get("userGroup")
-    if user_group == "admin":
-        all_bills = bills.find({"status": {"$ne": "settled"}}, {"_id": False, "name": True})
-    else:
-        all_bills = bills.find({"status": {"$ne": "settled"}, "group": user_group}, {"_id": False, "name": True})
+    condition = "" if user_group == "admin" else f" where bill_group='{user_group}'"
+    cur.execute(f"select bill_name from bills{condition};")
+
+    conn.commit()
+    conn.close()
     return {
-        "bills": [bill["name"] for bill in all_bills]
+        "bills": [bill[0] for bill in cur.fetchall()]
     }
 
 
@@ -113,7 +175,9 @@ def get_bills():
 @app.route('/api/bill', methods=["GET"])
 @token_check
 def get_bill():
-    items = list(bills.find({"name": request.args.get("bill")}, {"_id": False, "items": True}))[0]["items"]
+    bill = request.args.get("bill").replace("'", "''")
+    items = get_data("item_name, quantity, type", "items", [],
+                     ["name", "quantity", "type"], f" where bill_name='{bill}'")
     for item in items:
         item["cost"] = 0
         item["share"] = 0
@@ -125,30 +189,38 @@ def get_bill():
 @app.route('/api/user-bills', methods=["GET"])
 @token_check
 def get_user_bills():
-    return list(users.find({"username": request.args.get("username")},
-                           {"_id": False, "bills.name": True, "bills.amount": True,
-                            "bills.paid": True, "bills.locked": True}))[0]
+    username = request.args.get("username")
+    return {"bills": get_data("bill_name, amount, paid, locked", "user_bills", ["amount"],
+                              ["name", "amount", "paid", "locked"], f"where username='{username}'")}
 
 
 # Get a bill for the user
 @app.route('/api/user-bill', methods=["GET"])
 @token_check
 def get_user_bill():
-    return list(users.find({"username": request.args.get("username"), "bills.name": request.args.get("bill")},
-                           {"_id": False, "bills.$": 1}))[0]["bills"][0]
+    username = request.args.get("username")
+    bill = request.args.get("bill").replace("'", "''")
+    bill_data = get_data("bill_name, amount, paid, locked", "user_bills", ["amount"],
+                         ["name", "amount", "paid", "locked"], f"where username='{username}' and bill_name='{bill}'")[0]
+    bill_data["items"] = get_data("item_name, amount, quantity, share, type", "user_items", ["cost", "share"],
+                                  ["name", "cost", "quantity", "share", "type"], f"where bill_name='{bill}'")
+
+    return bill_data
 
 
 # Add a bill to user bills
 @app.route('/api/add-user-bills', methods=["POST"])
 @token_check
 def add_user_bills():
-    user_entry = {"username": request.json["username"], "locked": False}
-    user_bills = [{"name": bill, "items": [], "amount": 0, "paid": False, "locked": False}
-                  for bill in request.json["bills"]]
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    username = request.json["username"]
+    user_bills = [bill.replace("'", "''") for bill in request.json["bills"]]
+    entries = ", ".join([f"('{username}', '{bill}', 0, false, false)" for bill in user_bills])
+    cur.execute(f"insert into user_bills (username, bill_name, amount, paid, locked) values {entries};")
 
-    users.update_one({"username": request.json["username"]}, {"$push": {"bills": {"$each": user_bills}}})
-    bills.update_many({"name": {"$in": request.json["bills"]}}, {"$push": {"members": user_entry}})
-
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -156,12 +228,14 @@ def add_user_bills():
 @app.route('/api/remove-user-bills', methods=["POST"])
 @token_check
 def remove_user_bills():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
-    bill_names = request.json["bills"]
+    entries = ", ".join(["'" + bill.replace("'", "''") + "'" for bill in request.json["bills"]])
+    cur.execute(f"delete from user_bills where username='{username}' and bill_name in ({entries});")
 
-    users.update_one({"username": username}, {"$pull": {"bills": {"name": {"$in": bill_names}}}})
-    bills.update_many({"name": {"$in": bill_names}}, {"$pull": {"members": {"username": username}}})
-
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -169,9 +243,18 @@ def remove_user_bills():
 @app.route('/api/update-user-bill', methods=["POST"])
 @token_check
 def update_user_bill():
-    users.update_one({"username": request.json["username"], "bills.name": request.json["bill"]},
-                     {"$set": {"bills.$.items": request.json["items"]}})
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    username = request.json["username"]
+    bill = request.json["bill"].replace("'", "''")
+    items = request.json["items"]
+    item_ids, id_query = get_item_ids(bill)
+    entries = get_item_entries(username, items, item_ids)
+    cur.execute(f"delete from user_items where username='{username}' and item_id in ({id_query});")
+    cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries};")
 
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -179,13 +262,13 @@ def update_user_bill():
 @app.route('/api/lock-user-bill', methods=["POST"])
 @token_check
 def lock_user_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
-    bill_name = request.json["bill"]
-
-    bills.update_one({"name": bill_name, "members.username": username},
-                     {"$set": {"members.$.locked": True}})
-    users.update_one({"username": username, "bills.name": bill_name},
-                     {"$set": {"bills.$.locked": True}})
+    bill_name = request.json["bill"].replace("'", "''")
+    cur.execute(f"update user_bills set locked=true where username='{username}' and bill_name='{bill_name}';")
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -193,13 +276,13 @@ def lock_user_bill():
 @app.route('/api/unlock-bill', methods=["POST"])
 @token_check
 def unlock_bill():
-    usernames = request.json["users"]
-    bill_name = request.json["bill"]
-
-    users.update_many({"username": {"$in": usernames}, "bills.name": bill_name},
-                      {"$set": {"bills.$.locked": False}})
-    bills.update_one({"name": bill_name}, {"$set": {"members.$[elem].locked": False}},
-                     array_filters=[{"elem.username": {"$in": usernames}}])
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    usernames = ", ".join(request.json["users"])
+    bill_name = request.json["bill"].replace("'", "''")
+    cur.execute(f"update user_bills set locked=false where bill_name='{bill_name}' and username in ({usernames});")
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -207,20 +290,29 @@ def unlock_bill():
 @app.route('/api/all-bills', methods=["GET"])
 @token_check
 def get_all_bills():
-    all_bills = list(bills.find({}, {"_id": False, "name": True, "status": True, "members.locked": True}))
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     update_bills = []
+    cur.execute("select bill_name, bool_and(locked), count(locked) from user_bills group by bill_name;")
+    bills_data = {bill_name: (all_locked, user_count) for bill_name, all_locked, user_count in cur.fetchall()}
+    all_bills = get_data("bill_name, status", "bills", [], ["name", "status"])
     for bill in all_bills:
-        bill["members"] = [member["locked"] for member in bill["members"]]
-        status = "open" if len(bill["members"]) == 0 else "ready" if all(bill["members"]) else "pending"
+        status = "open"
+        if bill["name"] in bills_data:
+            all_locked, user_count = bills_data[bill["name"]]
+            status = "ready" if all_locked else "pending"
+            bill["members"] = user_count
         if bill["status"] != "settled" and bill["status"] != status:
             bill["status"] = status
-            update_bills.append((bill["name"], status))
-        bill["members"] = len(bill["members"])
+            update_bills.append((bill["name"].replace("'", "''"), status))
 
     if len(update_bills) != 0:
-        bills.bulk_write([pymongo.UpdateOne({"name": entry[0]},
-                                            {"$set": {"status": entry[1]}}) for entry in update_bills])
+        entries = ", ".join([f"('{entry[0]}', '{entry[1]}')" for entry in update_bills])
+        cur.execute(f"update bills as b set status=b2.status from (values {entries}) as b2(bill_name, status)\n"
+                    f"where b.bill_name = b2.bill_name;")
 
+    conn.commit()
+    conn.close()
     return {
         "bills": all_bills
     }
@@ -230,26 +322,29 @@ def get_all_bills():
 @app.route('/api/manage-bill', methods=["GET"])
 @token_check
 def manage_bill():
-    bill = request.args.get("bill")
-    users_data = list(users.find({"bills.name": bill}, {"_id": False, "username": True, "bills.$": True}))
-    items_data: dict[str, dict[str, list]] = {}
-    bill_users = []
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    bill = request.args.get("bill").replace("'", "''")
+    cur.execute(f"select username from user_bills where bill_name='{bill}';")
+    bill_users = [bill_data[0] for bill_data in cur.fetchall()]
 
-    for user in users_data:
-        bill_users.append(user["username"])
-        for item in user["bills"][0]["items"]:
-            if item["name"] not in items_data:
-                items_data[item["name"]] = {"name": item["name"], "users": []}
-            items_data[item["name"]]["users"].append({
-                "username": user["username"],
-                "share": item["share"]
-            })
+    items_data: dict[str, list] = {}
+    cur.execute(f"select username, item_name, share\n"
+                f"from user_items ui inner join items i on ui.item_id=i.item_id\n"
+                f"where bill_name='{bill}';")
+    for item_user, item_name, user_share in cur.fetchall():
+        if item_name not in items_data:
+            items_data[item_name] = []
+        items_data[item_name].append({
+            "username": item_user,
+            "share": float(user_share)
+        })
 
     for item in items_data:
         sharing = {}
         specified = {}
         total_share = 0
-        item_users = items_data[item]["users"]
+        item_users = items_data[item]
 
         for user in item_users:
             if user["share"] == 0:
@@ -284,19 +379,18 @@ def manage_bill():
                     else:
                         user["share"] = round(user["share"] * change * len(specified), 2)
 
-    bill_data = list(bills.find({"name": bill}, {"_id": False, "items": True, "group": True}))[0]
-    extra_items = [item["name"] for item in bill_data["items"]]
-    for item in extra_items:
-        if item not in items_data:
-            items_data[item] = {
-                "name": item,
-                "users": []
-            }
+    cur.execute(f"select item_name from items where bill_name='{bill}'")
+    for item in cur.fetchall():
+        if item[0] not in items_data:
+            items_data[item[0]] = []
+    cur.execute(f"select bill_group from bills where bill_name='{bill}'")
 
+    conn.commit()
+    conn.close()
     return {
-        "items": list(items_data.values()),
+        "items": [{"name": key, "users": value} for key, value in items_data.items()],
         "users": bill_users,
-        "group": bill_data["group"]
+        "group": cur.fetchone()[0]
     }
 
 
@@ -304,19 +398,21 @@ def manage_bill():
 @app.route('/api/save-bill', methods=["POST"])
 @token_check
 def save_bill():
-    bill = request.json["bill"]
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    bill = request.json["bill"].replace("'", "''")
     new_users = request.json["newUsers"]
     old_users = request.json["oldUsers"]
     items_data = request.json["items"]
 
-    bill_data = list(bills.find({"name": request.json["bill"]}, {"_id": False, "items": True}))[0]["items"]
+    bill_data = get_data("item_name, cost, quantity, type", "items", ["cost"],
+                         ["name", "cost", "quantity", "type"], f"where bill_name='{bill}'")
     items = {item["name"]: item for item in bill_data}
     user_items = {}
     for item in items_data:
         for user in item["users"]:
             if user["username"] not in user_items:
                 user_items[user["username"]] = {"items": [], "amount": 0}
-
             user_items[user["username"]]["items"].append({
                 "name": item["name"],
                 "quantity": items[item["name"]]["quantity"],
@@ -326,23 +422,27 @@ def save_bill():
             })
 
     existing_users = list(set(user_items) - set(new_users) - set(old_users))
+    item_ids, id_query = get_item_ids(bill)
 
     if len(new_users) != 0:
-        users.bulk_write([pymongo.UpdateOne({"username": user},
-                                            {"$push": {"bills": {"name": bill, "items": user_items[user]["items"],
-                                                                 "amount": 0, "paid": False, "locked": True}}})
-                          for user in new_users])
-        bills.bulk_write([pymongo.UpdateOne({"name": bill}, {"$push": {"members": {"username": user, "locked": True}}})
-                          for user in new_users])
+        entries = ", ".join([f"('{user}', '{bill}', 0, false, true)" for user in new_users])
+        cur.execute(f"insert into user_bills (username, bill_name, amount, paid, locked) values {entries};")
+
+        entries = ", ".join([get_item_entries(user, user_items[user]["items"], item_ids) for user in new_users])
+        cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries};")
 
     if len(old_users) != 0:
-        users.update_many({"username": {"$in": old_users}}, {"$pull": {"bills": {"name": bill}}})
-        bills.update_one({"name": bill}, {"$pull": {"members": {"username": {"$in": old_users}}}})
+        entries = ", ".join(["'" + user + "'" for user in old_users])
+        cur.execute(f"delete from user_bills where username in ({entries}) and bill_name='{bill}';")
+        cur.execute(f"delete from user_items where username in ({entries}) and item_id in ({id_query});")
 
-    users.bulk_write([pymongo.UpdateOne({"username": user, "bills.name": bill},
-                                        {"$set": {"bills.$.items": user_items[user]["items"]}})
-                      for user in existing_users])
+    entries = ", ".join(["'" + user + "'" for user in existing_users])
+    cur.execute(f"delete from user_items where username in ({entries}) and item_id in ({id_query});")
+    entries = ", ".join([get_item_entries(user, user_items[user]["items"], item_ids) for user in existing_users])
+    cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries};")
 
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -350,20 +450,24 @@ def save_bill():
 @app.route('/api/submit-bill', methods=["POST"])
 @token_check
 def submit_bill():
-    bill = request.json["bill"]
-    bill_users = list(users.find({"bills.name": bill}, {"_id": False, "username": True, "bills.$": True}))
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    bill = request.json["bill"].replace("'", "''")
     user_amounts = {}
+    cur.execute(f"select username, amount\n"
+                f"from user_items ui inner join items i on ui.item_id=i.item_id\n"
+                f"where bill_name='{bill}';")
+    for item_user, user_amount in cur.fetchall():
+        if item_user not in user_amounts:
+            user_amounts[item_user] = 0
+        user_amounts[item_user] += float(user_amount)
 
-    for user in bill_users:
-        user_amounts[user["username"]] = 0
-        for item in user["bills"][0]["items"]:
-            user_amounts[user["username"]] += item["cost"]
-
-    bills.update_one({"name": bill}, {"$set": {"status": "settled"}})
-    users.bulk_write([pymongo.UpdateOne({"username": user, "bills.name": bill},
-                                        {"$set": {"bills.$.amount": round(user_amounts[user], 2)}})
-                      for user in user_amounts])
-
+    cur.execute(f"update bills set status='settled' where bill_name='{bill}';")
+    entries = ", ".join([f"('{user}', '{round(user_amounts[user], 2)}')" for user in user_amounts])
+    cur.execute(f"update user_bills as ub set amount=ub2.amount from (values {entries}) as ub2(username, amount)\n"
+                f"where bill='{bill}' and ub.username = ub2.username;")
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -371,14 +475,15 @@ def submit_bill():
 @app.route('/api/users', methods=["GET"])
 @token_check
 def get_users():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     group = request.args["group"]
-    user_list = list(db.userGroups.find({"name": {"$in": ["admin", group]}}, {"_id": False, "users": True}))
-    users_list = []
-    for user in user_list:
-        users_list.extend(user["users"])
+    cur.execute(f"select username from users where user_group='admin' or user_group='{group}';")
 
+    conn.commit()
+    conn.close()
     return {
-        "users": users_list
+        "users": [q[0] for q in cur.fetchall()]
     }
 
 
@@ -386,18 +491,10 @@ def get_users():
 @app.route('/api/bill-split', methods=["GET"])
 @token_check
 def bill_split():
-    bill = request.args["bill"]
-    bill_users = list(users.find({"bills.name": bill}, {"_id": False, "username": True, "bills.$": True}))
-    users_list = []
-    for user in bill_users:
-        users_list.append({
-            "name": user["username"],
-            "share": user["bills"][0]["amount"],
-            "paid": user["bills"][0]["paid"]
-        })
-
+    bill = request.args["bill"].replace("'", "''")
     return {
-        "users": users_list
+        "users": get_data("username, amount, paid", "user_bills", ["share"],
+                          ["name", "share", "paid"], f"where bill_name='{bill}'")
     }
 
 
@@ -405,16 +502,21 @@ def bill_split():
 @app.route('/api/all-users', methods=["GET"])
 @token_check
 def all_users():
-    users_list = list(users.find({}, {"_id": False, "username": True, "bills.name": True,
-                                      "bills.amount": True, "bills.paid": True}))
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    cur.execute("select username from users;")
+    user_bills_each = {user[0]: [] for user in cur.fetchall()}
+    user_bills_all = get_data("username, bill_name, amount, paid", "user_bills", ["amount"],
+                              ["username", "name", "amount", "paid"], "where amount!=0 and paid=false")
+    for entry in user_bills_all:
+        user_bills_each[entry["username"]].append({key: entry[key] for key in entry if key != "username"})
 
-    for itr, user in enumerate(users_list):
-        users_list[itr]["bills"] = [bill for bill in user["bills"] if not bill["paid"] and bill["amount"] != 0]
-
+    conn.commit()
+    conn.close()
     return {
-        "users": users_list
+        "users": [{'username': key, 'bills': value} for key, value in user_bills_each.items()]
     }
 
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", debug=True)
+    app.run(host="0.0.0.0", debug=True, port=5000)

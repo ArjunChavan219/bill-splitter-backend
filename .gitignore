@@ -9,5 +9,7 @@
 **/.idea
 **/__pycache__
 
+# Database
 .env
 *.pem
+**/Database
