@@ -10,9 +10,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
 
-conn = psycopg2.connect(f"dbname=bill_splitter_db user={os.getenv('DB_USER')} password={os.getenv('DB_PASSWORD')}")
-conn.autocommit = True
-cur = conn.cursor()
+connection = f"dbname=bill_splitter_db user={os.getenv('DB_USER')} password={os.getenv('DB_PASSWORD')}"
 
 app = Flask(__name__)
 CORS(app)
@@ -47,11 +45,16 @@ def token_check(f):
 
 # Function for get user item/bill data
 def get_data(input_cols, table_name, format_cols, output_cols, condition=""):
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     table = "user_items ui inner join items i on ui.item_id=i.item_id" if table_name == "user_items" else table_name
     cur.execute(f"select {input_cols} from {table} {condition};")
     df = pd.DataFrame(cur.fetchall(), columns=output_cols)
     for col in format_cols:
         df[col] = df[col].astype("float")
+
+    conn.commit()
+    conn.close()
     return df.to_dict("records")
 
 
@@ -87,18 +90,24 @@ def server_ping():
 # Check if username and password exist
 @app.route('/api/login', methods=["GET"])
 def login_check():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     cur.execute(f"select username, password from users;")
     users_dict = {username: password for username, password in cur.fetchall()}
 
     username = request.args.get("username")
     password = request.args.get("password")
     if username not in users_dict:
+        conn.commit()
+        conn.close()
         return {
             "success": False,
             "error": "Username"
         }
 
     if not check_password_hash(users_dict[username], password):
+        conn.commit()
+        conn.close()
         return {
             "success": False,
             "error": "Password"
@@ -106,6 +115,8 @@ def login_check():
 
     cur.execute(f"select user_group from users where username='{username}';")
 
+    conn.commit()
+    conn.close()
     return {
         "success": True,
         "token": jwt.encode({"username": username}, "secret", algorithm="HS256"),
@@ -117,10 +128,14 @@ def login_check():
 @app.route('/api/password', methods=["POST"])
 @token_check
 def change_password():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
     password = generate_password_hash(request.json["password"], "sha256")
     cur.execute(f"update users set password='{password}' where username='{username}';")
 
+    conn.commit()
+    conn.close()
     return {
         "success": True
     }
@@ -130,8 +145,12 @@ def change_password():
 @app.route('/api/user', methods=["GET"])
 @token_check
 def user_data():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.args.get("username")
     cur.execute(f"select first_name, last_name from users where username='{username}';")
+    conn.commit()
+    conn.close()
     return {key: value for key, value in zip(["firstName", "lastName"], cur.fetchone())}
 
 
@@ -139,10 +158,14 @@ def user_data():
 @app.route('/api/bills', methods=["GET"])
 @token_check
 def get_bills():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     user_group = request.args.get("userGroup")
     condition = "" if user_group == "admin" else f" where bill_group='{user_group}'"
     cur.execute(f"select bill_name from bills{condition};")
 
+    conn.commit()
+    conn.close()
     return {
         "bills": [bill[0] for bill in cur.fetchall()]
     }
@@ -181,6 +204,7 @@ def get_user_bill():
                          ["name", "amount", "paid", "locked"], f"where username='{username}' and bill_name='{bill}'")[0]
     bill_data["items"] = get_data("item_name, amount, quantity, share, type", "user_items", ["cost", "share"],
                                   ["name", "cost", "quantity", "share", "type"], f"where bill_name='{bill}'")
+
     return bill_data
 
 
@@ -188,11 +212,15 @@ def get_user_bill():
 @app.route('/api/add-user-bills', methods=["POST"])
 @token_check
 def add_user_bills():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
     user_bills = [bill.replace("'", "''") for bill in request.json["bills"]]
     entries = ", ".join([f"('{username}', '{bill}', 0, false, false)" for bill in user_bills])
     cur.execute(f"insert into user_bills (username, bill_name, amount, paid, locked) values {entries};")
 
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -200,10 +228,14 @@ def add_user_bills():
 @app.route('/api/remove-user-bills', methods=["POST"])
 @token_check
 def remove_user_bills():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
     entries = ", ".join(["'" + bill.replace("'", "''") + "'" for bill in request.json["bills"]])
     cur.execute(f"delete from user_bills where username='{username}' and bill_name in ({entries});")
 
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -211,6 +243,8 @@ def remove_user_bills():
 @app.route('/api/update-user-bill', methods=["POST"])
 @token_check
 def update_user_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
     bill = request.json["bill"].replace("'", "''")
     items = request.json["items"]
@@ -219,6 +253,8 @@ def update_user_bill():
     cur.execute(f"delete from user_items where username='{username}' and item_id in ({id_query});")
     cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries};")
 
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -226,9 +262,13 @@ def update_user_bill():
 @app.route('/api/lock-user-bill', methods=["POST"])
 @token_check
 def lock_user_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     username = request.json["username"]
     bill_name = request.json["bill"].replace("'", "''")
     cur.execute(f"update user_bills set locked=true where username='{username}' and bill_name='{bill_name}';")
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -236,9 +276,13 @@ def lock_user_bill():
 @app.route('/api/unlock-bill', methods=["POST"])
 @token_check
 def unlock_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     usernames = ", ".join(request.json["users"])
     bill_name = request.json["bill"].replace("'", "''")
     cur.execute(f"update user_bills set locked=false where bill_name='{bill_name}' and username in ({usernames});")
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -246,6 +290,8 @@ def unlock_bill():
 @app.route('/api/all-bills', methods=["GET"])
 @token_check
 def get_all_bills():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     update_bills = []
     cur.execute("select bill_name, bool_and(locked), count(locked) from user_bills group by bill_name;")
     bills_data = {bill_name: (all_locked, user_count) for bill_name, all_locked, user_count in cur.fetchall()}
@@ -265,6 +311,8 @@ def get_all_bills():
         cur.execute(f"update bills as b set status=b2.status from (values {entries}) as b2(bill_name, status)\n"
                     f"where b.bill_name = b2.bill_name;")
 
+    conn.commit()
+    conn.close()
     return {
         "bills": all_bills
     }
@@ -274,6 +322,8 @@ def get_all_bills():
 @app.route('/api/manage-bill', methods=["GET"])
 @token_check
 def manage_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     bill = request.args.get("bill").replace("'", "''")
     cur.execute(f"select username from user_bills where bill_name='{bill}';")
     bill_users = [bill_data[0] for bill_data in cur.fetchall()]
@@ -335,6 +385,8 @@ def manage_bill():
             items_data[item[0]] = []
     cur.execute(f"select bill_group from bills where bill_name='{bill}'")
 
+    conn.commit()
+    conn.close()
     return {
         "items": [{"name": key, "users": value} for key, value in items_data.items()],
         "users": bill_users,
@@ -346,11 +398,13 @@ def manage_bill():
 @app.route('/api/save-bill', methods=["POST"])
 @token_check
 def save_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     bill = request.json["bill"].replace("'", "''")
     new_users = request.json["newUsers"]
     old_users = request.json["oldUsers"]
     items_data = request.json["items"]
-    print(items_data)
+
     bill_data = get_data("item_name, cost, quantity, type", "items", ["cost"],
                          ["name", "cost", "quantity", "type"], f"where bill_name='{bill}'")
     items = {item["name"]: item for item in bill_data}
@@ -387,6 +441,8 @@ def save_bill():
     entries = ", ".join([get_item_entries(user, user_items[user]["items"], item_ids) for user in existing_users])
     cur.execute(f"insert into user_items (username, item_id, amount, share) values {entries};")
 
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -394,6 +450,8 @@ def save_bill():
 @app.route('/api/submit-bill', methods=["POST"])
 @token_check
 def submit_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     bill = request.json["bill"].replace("'", "''")
     user_amounts = {}
     cur.execute(f"select username, amount\n"
@@ -408,6 +466,8 @@ def submit_bill():
     entries = ", ".join([f"('{user}', '{round(user_amounts[user], 2)}')" for user in user_amounts])
     cur.execute(f"update user_bills as ub set amount=ub2.amount from (values {entries}) as ub2(username, amount)\n"
                 f"where bill='{bill}' and ub.username = ub2.username;")
+    conn.commit()
+    conn.close()
     return {}
 
 
@@ -415,9 +475,13 @@ def submit_bill():
 @app.route('/api/users', methods=["GET"])
 @token_check
 def get_users():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     group = request.args["group"]
     cur.execute(f"select username from users where user_group='admin' or user_group='{group}';")
 
+    conn.commit()
+    conn.close()
     return {
         "users": [q[0] for q in cur.fetchall()]
     }
@@ -438,6 +502,8 @@ def bill_split():
 @app.route('/api/all-users', methods=["GET"])
 @token_check
 def all_users():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
     cur.execute("select username from users;")
     user_bills_each = {user[0]: [] for user in cur.fetchall()}
     user_bills_all = get_data("username, bill_name, amount, paid", "user_bills", ["amount"],
@@ -445,6 +511,8 @@ def all_users():
     for entry in user_bills_all:
         user_bills_each[entry["username"]].append({key: entry[key] for key in entry if key != "username"})
 
+    conn.commit()
+    conn.close()
     return {
         "users": [{'username': key, 'bills': value} for key, value in user_bills_each.items()]
     }
