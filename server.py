@@ -114,13 +114,13 @@ def login_check():
         }
 
     cur.execute(f"select user_group from users where username='{username}';")
-
+    user_group = cur.fetchone()[0]
     conn.commit()
     conn.close()
     return {
         "success": True,
         "token": jwt.encode({"username": username}, "secret", algorithm="HS256"),
-        "userGroup": cur.fetchone()[0]
+        "userGroup": user_group
     }
 
 
@@ -149,9 +149,10 @@ def user_data():
     cur = conn.cursor()
     username = request.args.get("username")
     cur.execute(f"select first_name, last_name from users where username='{username}';")
+    user_name = {key: value for key, value in zip(["firstName", "lastName"], cur.fetchone())}
     conn.commit()
     conn.close()
-    return {key: value for key, value in zip(["firstName", "lastName"], cur.fetchone())}
+    return user_name
 
 
 # Get list of all unsettled bills
@@ -163,11 +164,11 @@ def get_bills():
     user_group = request.args.get("userGroup")
     condition = "" if user_group == "admin" else f" where bill_group='{user_group}'"
     cur.execute(f"select bill_name from bills{condition};")
-
+    bills = [bill[0] for bill in cur.fetchall()]
     conn.commit()
     conn.close()
     return {
-        "bills": [bill[0] for bill in cur.fetchall()]
+        "bills": bills
     }
 
 
@@ -231,8 +232,11 @@ def remove_user_bills():
     conn = psycopg2.connect(connection)
     cur = conn.cursor()
     username = request.json["username"]
-    entries = ", ".join(["'" + bill.replace("'", "''") + "'" for bill in request.json["bills"]])
+    bills = request.json["bills"]
+    entries = ", ".join(["'" + bill.replace("'", "''") + "'" for bill in bills])
     cur.execute(f"delete from user_bills where username='{username}' and bill_name in ({entries});")
+    id_query = ", ".join([get_item_ids(bill.replace("'", "''"))[1] for bill in bills])
+    cur.execute(f"delete from user_items where username='{username}' and item_id in ({id_query});")
 
     conn.commit()
     conn.close()
@@ -278,7 +282,7 @@ def lock_user_bill():
 def unlock_bill():
     conn = psycopg2.connect(connection)
     cur = conn.cursor()
-    usernames = ", ".join(request.json["users"])
+    usernames = ", ".join([f"'{user}'" for user in request.json["users"]])
     bill_name = request.json["bill"].replace("'", "''")
     cur.execute(f"update user_bills set locked=false where bill_name='{bill_name}' and username in ({usernames});")
     conn.commit()
@@ -384,13 +388,13 @@ def manage_bill():
         if item[0] not in items_data:
             items_data[item[0]] = []
     cur.execute(f"select bill_group from bills where bill_name='{bill}'")
-
+    bill_group = cur.fetchone()[0]
     conn.commit()
     conn.close()
     return {
         "items": [{"name": key, "users": value} for key, value in items_data.items()],
         "users": bill_users,
-        "group": cur.fetchone()[0]
+        "group": bill_group
     }
 
 
@@ -463,9 +467,9 @@ def submit_bill():
         user_amounts[item_user] += float(user_amount)
 
     cur.execute(f"update bills set status='settled' where bill_name='{bill}';")
-    entries = ", ".join([f"('{user}', '{round(user_amounts[user], 2)}')" for user in user_amounts])
+    entries = ", ".join([f"('{user}', {round(user_amounts[user], 2)})" for user in user_amounts])
     cur.execute(f"update user_bills as ub set amount=ub2.amount from (values {entries}) as ub2(username, amount)\n"
-                f"where bill='{bill}' and ub.username = ub2.username;")
+                f"where bill_name='{bill}' and ub.username = ub2.username;")
     conn.commit()
     conn.close()
     return {}
@@ -479,11 +483,11 @@ def get_users():
     cur = conn.cursor()
     group = request.args["group"]
     cur.execute(f"select username from users where user_group='admin' or user_group='{group}';")
-
+    users = [q[0] for q in cur.fetchall()]
     conn.commit()
     conn.close()
     return {
-        "users": [q[0] for q in cur.fetchall()]
+        "users": users
     }
 
 
