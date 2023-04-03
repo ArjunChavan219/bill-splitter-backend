@@ -5,7 +5,9 @@ import pandas as pd
 from flask_cors import CORS
 from functools import wraps
 from dotenv import load_dotenv
+from twilio.rest import Client
 from flask import Flask, request
+from random import choice, shuffle
 from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
@@ -14,6 +16,11 @@ connection = f"dbname=bill_splitter_db user={os.getenv('DB_USER')} password={os.
 
 app = Flask(__name__)
 CORS(app)
+
+account_sid = os.getenv('ACCT_SID')
+auth_token = os.getenv('TWILIO_AUTH')
+TWILIO_PHONE = os.getenv('TWILIO_PHONE')
+MY_PHONE = os.getenv('PERSONAL_PHONE')
 
 
 # Function to return error object
@@ -79,6 +86,23 @@ def get_item_entries(username, items, item_ids):
     return ", ".join(item_entries)
 
 
+# Function to generate a password
+def password_generator():
+    letters_small = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+                     't', 'u', 'v', 'w', 'x', 'y', 'z']
+    letters_caps = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+                    'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
+    numbers = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+    symbols = ['!', '#', '$', '%', '&', '(', ')', '*', '+', '_']
+
+    password_list = [choice(letters_small) for _ in range(3)]
+    password_list.append(choice(letters_caps))
+    password_list.append(choice(numbers))
+    password_list.append(choice(symbols))
+    shuffle(password_list)
+    return "".join(password_list)
+
+
 # Server test ping
 @app.route('/api/ping', methods=["GET"])
 def server_ping():
@@ -113,14 +137,15 @@ def login_check():
             "error": "Password"
         }
 
-    cur.execute(f"select user_group from users where username='{username}';")
-    user_group = cur.fetchone()[0]
+    cur.execute(f"select first_name, last_name, user_group from users where username='{username}';")
+    user_first_name, user_last_name, user_group = cur.fetchone()
     conn.commit()
     conn.close()
     return {
         "success": True,
         "token": jwt.encode({"username": username}, "secret", algorithm="HS256"),
-        "userGroup": user_group
+        "userGroup": user_group,
+        "userName": user_first_name + " " + user_last_name
     }
 
 
@@ -201,12 +226,12 @@ def get_user_bills():
 def get_user_bill():
     username = request.args.get("username")
     bill = request.args.get("bill").replace("'", "''")
-    bill_data = get_data("bill_name, amount, paid, locked", "user_bills", ["amount"],
-                         ["name", "amount", "paid", "locked"], f"where username='{username}' and bill_name='{bill}'")[0]
-    bill_data["items"] = get_data("item_name, amount, quantity, share, type", "user_items", ["cost", "share"],
-                                  ["name", "cost", "quantity", "share", "type"], f"where bill_name='{bill}'")
 
-    return bill_data
+    return {
+        "items": get_data("item_name, amount, quantity, share, type", "user_items", ["cost", "share"],
+                          ["name", "cost", "quantity", "share", "type"],
+                          f"where bill_name='{bill}' and username='{username}'")
+    }
 
 
 # Add a bill to user bills
@@ -315,10 +340,12 @@ def get_all_bills():
         cur.execute(f"update bills as b set status=b2.status from (values {entries}) as b2(bill_name, status)\n"
                     f"where b.bill_name = b2.bill_name;")
 
+    order = {"ready": 0, "pending": 1, "open": 2, "settled": 3}
+
     conn.commit()
     conn.close()
     return {
-        "bills": all_bills
+        "bills": sorted(all_bills, key=lambda a: (order[a["status"]], a["name"]))
     }
 
 
@@ -522,5 +549,63 @@ def all_users():
     }
 
 
+# Create a user
+@app.route('/api/create-user', methods=["POST"])
+@token_check
+def create_user():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    first_name = request.json["firstName"]
+    last_name = request.json["lastName"]
+    user_group = request.json["userGroup"]
+    username = first_name.lower() + last_name[0].upper()
+    password = password_generator()
+    final_pass = generate_password_hash(password, "sha256")
+
+    cur.execute(f"insert into users (username, first_name, last_name, password, user_group) values"
+                f" ('{username}', '{first_name}', '{last_name}', '{final_pass}', '{user_group}');")
+
+    client = Client(account_sid, auth_token)
+
+    message = client.messages.create(
+        from_=f"whatsapp:{TWILIO_PHONE}",
+        body=f"New user created:\n{username} @ {password} # {user_group}",
+        to=f"whatsapp:{MY_PHONE}"
+    )
+    print(message.status)
+
+    conn.commit()
+    conn.close()
+    return {}
+
+
+# Create a bill
+@app.route('/api/create-bill', methods=["POST"])
+@token_check
+def create_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    bill = request.json["bill"]
+    bill_group = request.json["billGroup"]
+    items = request.json["items"]
+
+    if "members" in request.json:
+        entries = ", ".join([f"('{user}', '{bill}', 0, false, false)" for user in request.json["members"]])
+        cur.execute(f"insert into user_bills (username, bill_name, amount, paid, locked) values {entries};")
+
+    items_entries = []
+    for item in items:
+        items_entries.append((item["name"], item["cost"], item["quantity"], item["type"]))
+    entries = ", ".join([f"('{bill}', '{item}', {cost}, {quantity}, '{item_type}')"
+                         for item, cost, quantity, item_type in items_entries])
+    cur.execute(f"insert into items (bill_name, item_name, cost, quantity, type) values {entries};")
+    cur.execute(f"insert into bills (bill_name, bill_group, status) values"
+                f" ('{bill}', '{bill_group}', 'open');")
+
+    conn.commit()
+    conn.close()
+    return {}
+
+
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", debug=True, port=5000)
+    app.run(host="0.0.0.0", debug=True, port=3000)
