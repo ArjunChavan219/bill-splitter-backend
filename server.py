@@ -578,5 +578,33 @@ def create_user():
     return {}
 
 
+# Create a bill
+@app.route('/api/create-bill', methods=["POST"])
+@token_check
+def create_bill():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    bill = request.json["bill"]
+    bill_group = request.json["billGroup"]
+    items = request.json["items"]
+
+    if "members" in request.json:
+        entries = ", ".join([f"('{user}', '{bill}', 0, false, false)" for user in request.json["members"]])
+        cur.execute(f"insert into user_bills (username, bill_name, amount, paid, locked) values {entries};")
+
+    items_entries = []
+    for item in items:
+        items_entries.append((item["name"], item["cost"], item["quantity"], item["type"]))
+    entries = ", ".join([f"('{bill}', '{item}', {cost}, {quantity}, '{item_type}')"
+                         for item, cost, quantity, item_type in items_entries])
+    cur.execute(f"insert into items (bill_name, item_name, cost, quantity, type) values {entries};")
+    cur.execute(f"insert into bills (bill_name, bill_group, status) values"
+                f" ('{bill}', '{bill_group}', 'open');")
+
+    conn.commit()
+    conn.close()
+    return {}
+
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", debug=True, port=3000)
