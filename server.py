@@ -340,10 +340,12 @@ def get_all_bills():
         cur.execute(f"update bills as b set status=b2.status from (values {entries}) as b2(bill_name, status)\n"
                     f"where b.bill_name = b2.bill_name;")
 
+    order = {"ready": 0, "pending": 1, "open": 2, "settled": 3}
+
     conn.commit()
     conn.close()
     return {
-        "bills": all_bills
+        "bills": sorted(all_bills, key=lambda a: (order[a["status"]], a["name"]))
     }
 
 
