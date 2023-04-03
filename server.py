@@ -6,6 +6,7 @@ from flask_cors import CORS
 from functools import wraps
 from dotenv import load_dotenv
 from flask import Flask, request
+from random import choice, shuffle
 from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
@@ -77,6 +78,23 @@ def get_item_entries(username, items, item_ids):
         item_id, amount, share = item_ids[item["name"]], item["cost"], item["share"]
         item_entries.append(f"('{username}', {str(item_id)}, {str(amount)}, {str(share)})")
     return ", ".join(item_entries)
+
+
+# Function to generate a password
+def password_generator():
+    letters_small = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+                     't', 'u', 'v', 'w', 'x', 'y', 'z']
+    letters_caps = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+                    'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
+    numbers = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+    symbols = ['!', '#', '$', '%', '&', '(', ')', '*', '+', '_']
+
+    password_list = [choice(letters_small) for _ in range(3)]
+    password_list.append(choice(letters_caps))
+    password_list.append(choice(numbers))
+    password_list.append(choice(symbols))
+    shuffle(password_list)
+    return "".join(password_list)
 
 
 # Server test ping
@@ -522,5 +540,34 @@ def all_users():
     }
 
 
+# Create a user
+@app.route('/api/create-user', methods=["POST"])
+@token_check
+def create_user():
+    conn = psycopg2.connect(connection)
+    cur = conn.cursor()
+    first_name = request.json["firstName"]
+    last_name = request.json["lastName"]
+    user_group = request.json["userGroup"]
+    username = first_name.lower() + last_name[0].upper()
+    password = password_generator()
+    final_pass = generate_password_hash(password, "sha256")
+
+    cur.execute(f"insert into users (username, first_name, last_name, password, user_group) values"
+                f" ('{username}', '{first_name}', '{last_name}', '{final_pass}', '{user_group}');")
+
+    client = Client(account_sid, auth_token)
+
+    message = client.messages.create(
+        from_=f"whatsapp:{TWILIO_PHONE}",
+        body=f"New user created:\n{username} @ {password} # {user_group}",
+        to=f"whatsapp:{MY_PHONE}"
+    )
+
+    conn.commit()
+    conn.close()
+    return {}
+
+
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", debug=True, port=5000)
+    app.run(host="0.0.0.0", debug=True, port=3000)
