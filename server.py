@@ -137,14 +137,15 @@ def login_check():
             "error": "Password"
         }
 
-    cur.execute(f"select user_group from users where username='{username}';")
-    user_group = cur.fetchone()[0]
+    cur.execute(f"select first_name, last_name, user_group from users where username='{username}';")
+    user_first_name, user_last_name, user_group = cur.fetchone()
     conn.commit()
     conn.close()
     return {
         "success": True,
         "token": jwt.encode({"username": username}, "secret", algorithm="HS256"),
-        "userGroup": user_group
+        "userGroup": user_group,
+        "userName": user_first_name + " " + user_last_name
     }
 
 
