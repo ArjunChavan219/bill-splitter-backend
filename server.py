@@ -226,12 +226,12 @@ def get_user_bills():
 def get_user_bill():
     username = request.args.get("username")
     bill = request.args.get("bill").replace("'", "''")
-    bill_data = get_data("bill_name, amount, paid, locked", "user_bills", ["amount"],
-                         ["name", "amount", "paid", "locked"], f"where username='{username}' and bill_name='{bill}'")[0]
-    bill_data["items"] = get_data("item_name, amount, quantity, share, type", "user_items", ["cost", "share"],
-                                  ["name", "cost", "quantity", "share", "type"], f"where bill_name='{bill}'")
 
-    return bill_data
+    return {
+        "items": get_data("item_name, amount, quantity, share, type", "user_items", ["cost", "share"],
+                          ["name", "cost", "quantity", "share", "type"],
+                          f"where bill_name='{bill}' and username='{username}'")
+    }
 
 
 # Add a bill to user bills
