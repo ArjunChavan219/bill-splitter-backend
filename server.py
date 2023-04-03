@@ -5,6 +5,7 @@ import pandas as pd
 from flask_cors import CORS
 from functools import wraps
 from dotenv import load_dotenv
+from twilio.rest import Client
 from flask import Flask, request
 from random import choice, shuffle
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -15,6 +16,11 @@ connection = f"dbname=bill_splitter_db user={os.getenv('DB_USER')} password={os.
 
 app = Flask(__name__)
 CORS(app)
+
+account_sid = "AC4d26ee4b7ff5b5d27c8835e9fdb1d427"
+auth_token = "02127d31bb90086ab2d78be003c03566"
+TWILIO_PHONE = "+14155238886"
+MY_PHONE = "+918451956800"
 
 
 # Function to return error object
