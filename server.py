@@ -572,6 +572,7 @@ def create_user():
         body=f"New user created:\n{username} @ {password} # {user_group}",
         to=f"whatsapp:{MY_PHONE}"
     )
+    print(message.status)
 
     conn.commit()
     conn.close()
